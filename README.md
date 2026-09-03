@@ -87,7 +87,7 @@ Two patterns recur across the leaderboard. First, satisfying explicit constraint
 ## 🛠 Installation
 
 ```bash
-git clone https://github.com/<your-org>/PodBench.git
+git clone https://github.com/xucncn/PodBench.git
 cd PodBench
 pip install -r requirements.txt
 ```
