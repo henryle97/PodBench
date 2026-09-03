@@ -1,0 +1,26 @@
+# Secrets — never commit API keys
+env.local.sh
+.env
+*.key
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Inference outputs and logs
+inference/llm_infer_results/
+inference/infer_logs/
+*.log
+
+# Evaluation intermediates
+*.jsonl.organized
+*.sanitized
+responses/
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
