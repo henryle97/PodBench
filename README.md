@@ -1,6 +1,6 @@
 # PodBench: A Comprehensive Benchmark for Instruction-Aware Audio-Oriented Podcast Script Generation
 <p align="center">
-  📃 <a href="https://aclanthology.org/2026.acl-long.2019/" target="_blank">[Paper]</a> • 🔗 <a href="https://doi.org/10.18653/v1/2026.acl-long.2019" target="_blank">[DOI]</a> • 📊 <a href="benchmark_query/podbench_800.json">[Benchmark]</a>
+  📃 <a href="https://aclanthology.org/2026.acl-long.2019/" target="_blank">[Paper]</a> • 🔗 <a href="https://doi.org/10.18653/v1/2026.acl-long.2019" target="_blank">[DOI]</a> • 📊 <a href="benchmark_query/podbench_800.json">[Benchmark]</a> • 🤗 <a href="https://huggingface.co/datasets/cnxu/PodBench" target="_blank">[HuggingFace]</a>
 </p>
 
 <p align="center">
@@ -116,6 +116,22 @@ pip install "vllm>=0.9.0" transformers
 └── requirements.txt
 ```
 
+### Loading from HuggingFace
+
+The same benchmark is also on the Hub at
+[`cnxu/PodBench`](https://huggingface.co/datasets/cnxu/PodBench):
+
+```python
+from datasets import load_dataset
+
+ds = load_dataset("cnxu/PodBench", split="test")
+print(ds[0]["input_prompt"])
+```
+
+The Hub copy carries the same content, repackaged as JSONL for the dataset
+viewer. The JSON file in this repository remains the reference copy used by the
+evaluation scripts.
+
 ## 🚀 Quick Start
 
 Evaluating a local model end to end — generate, score, then rank:
@@ -206,7 +222,7 @@ python calculate_scores.py \
   --export_csv ./scores.csv          # optional CSV export
 ```
 
-The output reports Instruction Following, Podcast Script Quality with its three-dimension breakdown, and their average. Our per-sample judge outputs for the 34 systems in the paper are released separately on HuggingFace.
+The output reports Instruction Following, Podcast Script Quality with its three-dimension breakdown, and their average. Our per-sample judge outputs for the 34 systems in the paper will be released separately; the benchmark itself is available on the Hub at [`cnxu/PodBench`](https://huggingface.co/datasets/cnxu/PodBench).
 
 ### Key Arguments
 
