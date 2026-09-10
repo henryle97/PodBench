@@ -6,15 +6,22 @@ A single process serves the whole benchmark: data parallelism replicates the mod
 across GPUs and vLLM schedules the prompts internally, so there is no need to shard
 the input or merge per-GPU output files.
 
+Queries are pulled from the Hugging Face Hub by default; pass ``--input-data-file``
+to read a local JSON copy instead.
+
 Requires vLLM >= 0.9.0 for offline data-parallel inference.
 """
 
 import argparse
 import json
 import os
+import sys
 
 from transformers import AutoTokenizer
 from vllm import LLM, SamplingParams
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from podbench_data import load_podbench, load_podbench_json  # noqa: E402
 
 # Chat templates that a few released checkpoints need special handling for.
 GLM4_LONGWRITER = "LongWriter-glm4-9b"
@@ -61,8 +68,9 @@ def main():
     parser = argparse.ArgumentParser(description="Run PodBench inference with vLLM")
     parser.add_argument("--model-path", type=str, required=True,
                         help="Local path or HuggingFace model ID")
-    parser.add_argument("--input-data-file", type=str, required=True,
-                        help="Benchmark query file (JSON array)")
+    parser.add_argument("--input-data-file", type=str, default=None,
+                        help="Local benchmark file (JSON). Defaults to loading "
+                             "cnxu/PodBench from the Hugging Face Hub.")
     parser.add_argument("--output-data-file", type=str, required=True,
                         help="Destination JSONL file")
     parser.add_argument("--tensor-parallel-size", type=int, default=1,
@@ -84,9 +92,12 @@ def main():
     parser.add_argument("--num-return-sequences", type=int, default=1)
     args = parser.parse_args()
 
-    print(f"Loading queries from {args.input_data_file}")
-    with open(args.input_data_file, "r", encoding="utf-8") as f:
-        test_data = json.load(f)
+    if args.input_data_file:
+        print(f"Loading queries from {args.input_data_file}")
+        test_data = load_podbench_json(args.input_data_file)
+    else:
+        print("Loading queries from the Hugging Face Hub (cnxu/PodBench)")
+        test_data = load_podbench()
     print(f"Loaded {len(test_data)} queries")
 
     output_file = os.path.expanduser(args.output_data_file)

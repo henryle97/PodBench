@@ -1,5 +1,8 @@
 # PodBench dependencies
 
+# --- Benchmark data ---
+datasets>=2.14.0
+
 # --- Evaluation ---
 requests>=2.28.0
 tqdm>=4.64.0

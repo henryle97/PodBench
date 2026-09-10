@@ -1,6 +1,6 @@
 # PodBench: A Comprehensive Benchmark for Instruction-Aware Audio-Oriented Podcast Script Generation
 <p align="center">
-  📃 <a href="https://aclanthology.org/2026.acl-long.2019/" target="_blank">[Paper]</a> • 🔗 <a href="https://doi.org/10.18653/v1/2026.acl-long.2019" target="_blank">[DOI]</a> • 📊 <a href="benchmark_query/podbench_800.json">[Benchmark]</a> • 🤗 <a href="https://huggingface.co/datasets/cnxu/PodBench" target="_blank">[HuggingFace]</a>
+  📃 <a href="https://aclanthology.org/2026.acl-long.2019/" target="_blank">[Paper]</a> • 🔗 <a href="https://doi.org/10.18653/v1/2026.acl-long.2019" target="_blank">[DOI]</a> • 📊 <a href="https://huggingface.co/datasets/cnxu/PodBench" target="_blank">[Benchmark]</a>
 </p>
 
 <p align="center">
@@ -98,39 +98,27 @@ For local generation with vLLM, additionally install:
 pip install "vllm>=0.9.0" transformers
 ```
 
-## 📂 Repository Structure
+## 🤗 Benchmark Data
 
-```bash
-.
-├── evaluate_benchmark.py           # Evaluation script (LLM-as-a-Judge)
-├── calculate_scores.py             # Score aggregation & leaderboard
-├── benchmark_query/
-│   └── podbench_800.json           # Full benchmark (800 queries)
-├── evaluator/
-│   ├── prompt_instruction_following.md  # Stage 1 rubric
-│   └── prompt_script_quality.md         # Stage 2 rubric
-├── inference/                      # vLLM generation with data parallelism
-│   ├── env.sh                      # Model path, parallelism & decoding config
-│   ├── run_inference.sh            # Launcher (derives tp/dp from visible GPUs)
-│   └── run_inference.py            # Generation script
-└── requirements.txt
+The benchmark lives on the Hugging Face Hub at
+[`cnxu/PodBench`](https://huggingface.co/datasets/cnxu/PodBench) and is fetched
+automatically by the scripts in this repository. To load it directly:
+
+```python
+from podbench_data import load_podbench
+
+data = load_podbench()          # list of 800 dicts
+print(data[0]["input_prompt"])  # the fully assembled model input
 ```
 
-### Loading from HuggingFace
-
-The same benchmark is also on the Hub at
-[`cnxu/PodBench`](https://huggingface.co/datasets/cnxu/PodBench):
+`load_podbench` merges the dataset's `meta` object back into each record. Using
+`datasets` directly works too:
 
 ```python
 from datasets import load_dataset
 
 ds = load_dataset("cnxu/PodBench", split="test")
-print(ds[0]["input_prompt"])
 ```
-
-The Hub copy carries the same content, repackaged as JSONL for the dataset
-viewer. The JSON file in this repository remains the reference copy used by the
-evaluation scripts.
 
 ## 🚀 Quick Start
 

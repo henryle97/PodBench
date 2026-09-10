@@ -15,8 +15,9 @@ MODEL_PATH="${MODEL_PATH:-/path/to/your/model}"
 # Display name, used for output directory naming
 MODEL_NAME="${MODEL_NAME:-your-model-name}"
 
-# Benchmark query file
-INPUT_DATA_FILE="${INPUT_DATA_FILE:-${ROOT_DIR}/benchmark_query/podbench_800.json}"
+# Benchmark queries. Leave empty to load cnxu/PodBench from the Hugging Face
+# Hub; set a path to use a local JSON copy instead.
+INPUT_DATA_FILE="${INPUT_DATA_FILE:-}"
 
 # Output and log directories
 OUTPUT_BASE_DIR="${SCRIPT_DIR}/llm_infer_results"

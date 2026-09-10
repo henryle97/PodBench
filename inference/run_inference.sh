@@ -41,7 +41,7 @@ if (( NEED_GPU > N_GPU )); then
     exit 1
 fi
 
-if [[ ! -f "${INPUT_DATA_FILE}" ]]; then
+if [[ -n "${INPUT_DATA_FILE}" && ! -f "${INPUT_DATA_FILE}" ]]; then
     echo "ERROR: benchmark file not found: ${INPUT_DATA_FILE}" >&2
     exit 1
 fi
@@ -51,7 +51,7 @@ OUTPUT_FILE="${OUTPUT_BASE_DIR}/${MODEL_NAME}/${GENERATION_CONFIG_STR}/generatio
 echo "=============================================="
 echo "PodBench vLLM Inference"
 echo "  model      : ${MODEL_NAME} (${MODEL_PATH})"
-echo "  input      : ${INPUT_DATA_FILE}"
+echo "  input      : ${INPUT_DATA_FILE:-cnxu/PodBench (HuggingFace Hub)}"
 echo "  output     : ${OUTPUT_FILE}"
 echo "  gpus       : ${N_GPU}  (tp=${TP_SIZE}, dp=${DP_SIZE}, ep=${ENABLE_EP})"
 echo "  generation : ${GENERATION_CONFIG_STR}"
@@ -63,10 +63,10 @@ mkdir -p "${LOG_DIR}"
 EXTRA_ARGS=()
 [[ "${ENABLE_EP}" == "true" ]] && EXTRA_ARGS+=(--enable-expert-parallel)
 [[ -n "${MAX_MODEL_LEN:-}" ]] && EXTRA_ARGS+=(--max-model-len "${MAX_MODEL_LEN}")
+[[ -n "${INPUT_DATA_FILE}" ]] && EXTRA_ARGS+=(--input-data-file "${INPUT_DATA_FILE}")
 
 python3 "${SCRIPT_DIR}/run_inference.py" \
     --model-path "${MODEL_PATH}" \
-    --input-data-file "${INPUT_DATA_FILE}" \
     --output-data-file "${OUTPUT_FILE}" \
     --tensor-parallel-size "${TP_SIZE}" \
     --data-parallel-size "${DP_SIZE}" \
