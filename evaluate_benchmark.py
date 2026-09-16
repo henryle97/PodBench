@@ -20,6 +20,8 @@ from threading import Lock
 import requests
 from tqdm import tqdm
 
+from podbench_rubric import DIMENSIONS, dimension_scores, find_dimension, read_score
+
 try:
     import json_repair
 except ImportError:
@@ -35,33 +37,51 @@ DEFAULT_JUDGE_MODEL = "anthropic/claude-opus-4.5"
 # Judge inputs are capped to bound cost and stay within context limits.
 MAX_SCRIPT_CHARS = 16000
 
-# Quality rubric dimensions, keyed exactly as the judge emits them.
+# Quality rubric dimensions. The judge names them in the language of the prompt
+# it was given, so the keys live in podbench_rubric rather than here.
 # English names: Content Substance (45), Narrative Engagement (30),
 # Conversational Naturalness (25).
-QUALITY_DIMENSIONS = [
-    "内容深度与价值（45分）",
-    "结构与叙事设计（30分）",
-    "语言表达与传播效果（25分）",
-]
 
-# Key holding a dimension's score string, formatted as "<score>/<max>".
-DIM_SCORE_KEY = "得分"
+# Judge prompts, per script language. --language picks the pair.
+PROMPTS_BY_LANGUAGE = {
+    "zh": ("evaluator/prompt_instruction_following.md",
+           "evaluator/prompt_script_quality.md"),
+    "en": ("evaluator/prompt_instruction_following.en.md",
+           "evaluator/prompt_script_quality.en.md"),
+}
+
+
+#: Chat-completions endpoints a judge can be served from. OpenRouter is what the
+#: paper used; any OpenAI-compatible endpoint works, which is how a judge that
+#: OpenRouter does not carry is reached.
+JUDGE_ENDPOINTS = {
+    "openrouter": ("https://openrouter.ai/api/v1/chat/completions", "OPENROUTER_API_KEY"),
+    "openai": ("https://api.openai.com/v1/chat/completions", "OPENAI_API_KEY"),
+}
 
 
 class OpenRouterApi:
-    """Minimal OpenRouter chat-completions client used for LLM-as-Judge scoring."""
+    """Minimal chat-completions client used for LLM-as-Judge scoring.
 
-    def __init__(self, model, api_key=None, temperature=0.0, seed=42):
-        self.base_url = "https://openrouter.ai/api/v1/chat/completions"
-        self.api_key = api_key or os.environ.get("OPENROUTER_API_KEY", "")
+    Named for the endpoint the paper used. It speaks plain OpenAI-compatible
+    chat completions, so `base_url` can point anywhere that shape is served.
+    """
+
+    def __init__(self, model, api_key=None, temperature=0.0, seed=42,
+                 base_url=None, api_key_env="OPENROUTER_API_KEY"):
+        self.base_url = base_url or JUDGE_ENDPOINTS["openrouter"][0]
+        self.api_key = api_key or os.environ.get(api_key_env, "")
         if not self.api_key:
             raise ValueError(
-                "OpenRouter API key is required. "
-                "Set it via --api_key argument or OPENROUTER_API_KEY environment variable."
+                f"A judge API key is required. "
+                f"Set it via --api_key or the {api_key_env} environment variable."
             )
         self.model = model
         self.timeout = 600
-        # Greedy decoding with a fixed seed keeps judge scores stable across reruns.
+        # Greedy decoding with a fixed seed keeps judge scores stable across
+        # reruns. Both are omitted when None: some models reject temperature
+        # outright (gpt-5.x returns 400 on any value but the default), and a
+        # judge pinned that way is noisier than the paper's by construction.
         self.temperature = temperature
         self.seed = seed
 
@@ -80,8 +100,9 @@ class OpenRouterApi:
         payload = {
             "model": self.model,
             "messages": messages,
-            "temperature": self.temperature,
         }
+        if self.temperature is not None:
+            payload["temperature"] = self.temperature
         if self.seed is not None:
             payload["seed"] = self.seed
 
@@ -357,8 +378,12 @@ def evaluate_stage3(api, podcast_script, prompt_template, max_retries=10):
     truncated_script = truncate_text(podcast_script)
     prompt = prompt_template.replace('{podcast_script}', truncated_script)
 
+    # A judge that answered in a shape nobody asked for is retried, then failed.
+    # Scoring it zero would be worse than losing it: a missing dimension used to
+    # be skipped silently, so an answer in the wrong language scored 0/100 and
+    # was recorded as a success.
     eval_result, last_error = _judge_with_retries(
-        api, prompt, 'Stage3', lambda parsed: True, max_retries)
+        api, prompt, 'Stage3', lambda parsed: dimension_scores(parsed)[1], max_retries)
 
     if eval_result is None:
         return {
@@ -366,15 +391,16 @@ def evaluate_stage3(api, podcast_script, prompt_template, max_retries=10):
             "error": f"Failed after {max_retries} attempts. Last error: {last_error}",
         }, False
 
-    total_score = 0.0
-    for dim_key in QUALITY_DIMENSIONS:
-        if dim_key not in eval_result:
-            continue
-        raw = str(eval_result[dim_key].get(DIM_SCORE_KEY, ''))
-        try:
-            total_score += float(raw.split('/')[0])
-        except ValueError:
-            pass
+    pairs, complete = dimension_scores(eval_result)
+    if not complete:
+        return {
+            "total_score": -1,
+            "error": ("Judge response is missing a rubric dimension. Read with "
+                      "--language: a Chinese prompt names them in Chinese and an "
+                      "English prompt in English."),
+        }, False
+
+    total_score = sum(score for score, _ in pairs)
 
     _annotate_truncation(eval_result, len(podcast_script), truncated_script)
     eval_result['total_score'] = total_score
@@ -721,25 +747,37 @@ def main():
     parser.add_argument("--limit", type=int, default=None,
                        help="Evaluate only the first N samples, for a cheap smoke test")
     parser.add_argument("--judge_temperature", type=float, default=0.0,
-                       help="Judge decoding temperature")
+                       help="Judge decoding temperature; pass a negative value to "
+                            "omit the field, which some models require")
     parser.add_argument("--judge_seed", type=int, default=42,
                        help="Judge sampling seed; pass -1 to omit the field")
+    parser.add_argument("--endpoint", type=str, default="openrouter",
+                       choices=sorted(JUDGE_ENDPOINTS),
+                       help="Which chat-completions endpoint serves the judge")
+    parser.add_argument("--base_url", type=str, default=None,
+                       help="Override the endpoint URL entirely")
+    parser.add_argument("--language", type=str, default="zh",
+                       choices=sorted(PROMPTS_BY_LANGUAGE),
+                       help="Language of the scripts being judged; selects the judge "
+                            "prompts. --stage2_prompt/--stage3_prompt override it")
     parser.add_argument("--no_resume", action="store_true",
                        help="Ignore any existing checkpoint and start fresh")
     parser.add_argument("--no_analysis", action="store_true",
                        help="Skip the summary printed after evaluation")
     parser.add_argument("--stages", type=str, default="stage2,stage3",
                        help="Comma-separated stages to run")
-    parser.add_argument("--stage2_prompt", type=str,
-                       default="evaluator/prompt_instruction_following.md",
-                       help="Instruction-following prompt template")
-    parser.add_argument("--stage3_prompt", type=str,
-                       default="evaluator/prompt_script_quality.md",
-                       help="Script-quality prompt template")
+    parser.add_argument("--stage2_prompt", type=str, default=None,
+                       help="Instruction-following prompt template (default: by --language)")
+    parser.add_argument("--stage3_prompt", type=str, default=None,
+                       help="Script-quality prompt template (default: by --language)")
 
     args = parser.parse_args()
 
     stages = [s.strip() for s in args.stages.split(',')]
+
+    default_stage2, default_stage3 = PROMPTS_BY_LANGUAGE[args.language]
+    args.stage2_prompt = args.stage2_prompt or default_stage2
+    args.stage3_prompt = args.stage3_prompt or default_stage3
 
     # Relative paths resolve against this file so the script runs from any directory.
     script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -751,12 +789,19 @@ def main():
     stage2_template = load_prompt_template(stage2_prompt_path)
     stage3_template = load_prompt_template(stage3_prompt_path)
 
+    endpoint_url, api_key_env = JUDGE_ENDPOINTS[args.endpoint]
     api = OpenRouterApi(
         model=args.evaluator_model,
         api_key=args.api_key,
-        temperature=args.judge_temperature,
+        temperature=None if args.judge_temperature < 0 else args.judge_temperature,
         seed=None if args.judge_seed < 0 else args.judge_seed,
+        base_url=args.base_url or endpoint_url,
+        api_key_env=api_key_env,
     )
+    print(f"Judge: {args.evaluator_model} at {api.base_url}")
+    print(f"  temperature: {'omitted' if api.temperature is None else api.temperature}, "
+          f"seed: {'omitted' if api.seed is None else api.seed}")
+    print(f"  prompts ({args.language}): {args.stage2_prompt}, {args.stage3_prompt}")
 
     model_results = load_model_results(args.model_file, args.is_thinking_model)
     print(f"Loaded {len(model_results)} samples from {args.model_file}")

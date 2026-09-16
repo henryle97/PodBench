@@ -17,17 +17,12 @@ import argparse
 from collections import defaultdict
 import glob
 
+from podbench_rubric import DIMENSIONS, dimension_scores
 
-# Quality rubric dimensions, keyed exactly as the judge emits them, mapped to the
-# English names used in the paper.
-QUALITY_DIMENSIONS = {
-    "内容深度与价值（45分）": "Content Substance",
-    "结构与叙事设计（30分）": "Narrative Engagement",
-    "语言表达与传播效果（25分）": "Conversational Naturalness",
-}
-
-# Key holding a dimension's score string, formatted as "<score>/<max>".
-DIM_SCORE_KEY = "得分"
+# Quality rubric dimensions are named by the judge in the language of the prompt
+# it was given, so their keys live in podbench_rubric. Aggregation here is keyed
+# by the paper's English name, which makes a results directory holding both
+# Chinese-judged and English-judged models add up into one table.
 
 
 def load_eval_results(eval_file):
@@ -88,20 +83,11 @@ def _is_valid_stage(stage, result):
 def _parse_dim_scores(stage3):
     """Return ``(pairs, complete)`` for the three quality dimensions.
 
-    ``pairs`` holds ``(score, max_score)`` per dimension; ``complete`` is False if
-    any dimension is missing or malformed.
+    ``pairs`` holds ``(score, max_score)`` per dimension, in rubric order;
+    ``complete`` is False if any dimension is missing or malformed. Dimension
+    keys are resolved in whichever language the judge answered in.
     """
-    parsed = []
-    for dim_key in QUALITY_DIMENSIONS:
-        if dim_key not in stage3:
-            return parsed, False
-        raw = str(stage3[dim_key].get(DIM_SCORE_KEY, ''))
-        try:
-            score, max_score = raw.split('/')[:2]
-            parsed.append((float(score), float(max_score)))
-        except ValueError:
-            return parsed, False
-    return parsed, True
+    return dimension_scores(stage3)
 
 
 def analyze_single_model(eval_file, model_name):
@@ -136,8 +122,8 @@ def analyze_single_model(eval_file, model_name):
             stage2_checklist_scores['all'].append(check_item.get('score', 0))
 
         stage3_scores.append(s3_score)
-        for dim_key, pair in zip(QUALITY_DIMENSIONS, dim_pairs):
-            stage3_dim_scores[dim_key].append(pair)
+        for dimension, pair in zip(DIMENSIONS, dim_pairs):
+            stage3_dim_scores[dimension.name].append(pair)
 
         # Each axis contributes 50 points so the average is out of 100.
         combined_scores.append(s2_score * 50 + s3_score * 0.5)
@@ -236,7 +222,7 @@ def print_detailed_stats(all_stats):
         if stats['stage3_dims']:
             print("  By dimension:")
             for dim, dim_stats in stats['stage3_dims'].items():
-                name = QUALITY_DIMENSIONS.get(dim, dim)
+                name = dim
                 print(f"    {name}: {dim_stats['mean']:.2f}/{dim_stats['max_possible']:.0f} "
                       f"({dim_stats['normalized_mean'] * 100:.1f}%)")
         print()

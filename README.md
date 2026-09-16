@@ -212,6 +212,61 @@ python calculate_scores.py \
 
 The output reports Instruction Following, Podcast Script Quality with its three-dimension breakdown, and their average. Our per-sample judge outputs for the 34 systems in the paper will be released separately; the benchmark itself is available on the Hub at [`cnxu/PodBench`](https://huggingface.co/datasets/cnxu/PodBench).
 
+### Judging English scripts
+
+The rubrics ship in Chinese, and two things in them are bound to that language:
+the top-level JSON keys the judge is asked to return, and the thresholds counted
+in Chinese characters. `--language en` selects the English editions of both
+prompts instead.
+
+```bash
+python evaluate_benchmark.py \
+  --model_file <generations.jsonl> \
+  --output_file ./results/<MODEL_NAME>_eval.jsonl \
+  --language en
+```
+
+Scoring reads either language without being told which: dimension keys are
+resolved through `podbench_rubric.py`, so a results directory holding both
+Chinese-judged and English-judged models aggregates into one table.
+
+What the English edition converts, and nothing else:
+
+| Chinese original | English edition | Why |
+|---|---|---|
+| 1 minute ≈ 300 characters | 1 minute ≈ 150 words | The same duration at each language's speaking rate |
+| average sentence ≤ 20 characters | average sentence ≤ ~12 words | 20 characters is about four seconds of speech |
+| 3-4 information points per 200 characters | 3-4 per 100 words | 200 characters is about forty seconds of speech |
+| written connectives 尽管……但是…… | "although... nevertheless..." | The same register, in the other language |
+
+Both editions of the instruction-following prompt state a **±20%** tolerance on
+length. The Chinese original states ±5% in its rules section and ±20% in its
+audit step, and its worked example uses 2000 characters for a 5-minute podcast
+where the stated rate gives 1500. The English edition resolves that to the
+audit step's number, which is the one actually applied. Scores from the two
+editions are therefore not identical on a length-constrained sample.
+
+### Judges served from somewhere other than OpenRouter
+
+`--endpoint openai` sends the judge to `api.openai.com` and reads
+`OPENAI_API_KEY`; `--base_url` overrides the URL entirely. Any OpenAI-compatible
+chat-completions endpoint works.
+
+Some models reject the decoding parameters the paper used. `gpt-5.x` returns
+400 on any `temperature` but its default, so `--judge_temperature -1` omits the
+field (as `--judge_seed -1` already did for the seed). A judge pinned that way
+samples at temperature 1 and is noisier than the paper's greedy judge by
+construction; say so alongside any number it produces.
+
+```bash
+export OPENAI_API_KEY=sk-...
+python evaluate_benchmark.py \
+  --model_file <generations.jsonl> \
+  --output_file ./results/<MODEL_NAME>_eval.jsonl \
+  --evaluator_model gpt-5.6-luna \
+  --endpoint openai --language en --judge_temperature -1
+```
+
 ### Key Arguments
 
 | Argument | Default | Description |
@@ -223,6 +278,10 @@ The output reports Instruction Following, Podcast Script Quality with its three-
 | `--max_workers` | 20 | Concurrent judge requests |
 | `--limit` | none | Evaluate only the first N samples |
 | `--stages` | `stage2,stage3` | Rubrics to run |
+| `--language` | `zh` | Language of the judge prompts (`zh` or `en`) |
+| `--endpoint` | `openrouter` | Which chat-completions endpoint serves the judge |
+| `--base_url` | none | Override the endpoint URL entirely |
+| `--judge_temperature` | `0.0` | Negative omits the field, for models that reject it |
 | `--no_resume` | off | Ignore an existing checkpoint |
 
 ## 📄 License
