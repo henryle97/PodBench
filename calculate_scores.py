@@ -106,6 +106,13 @@ def analyze_single_model(eval_file, model_name):
     stage3_dim_scores = defaultdict(list)
     combined_scores = []
 
+    # Which stages this file actually holds. `--stages` can run one rubric alone,
+    # and a stage that was never run must not delete the other's data: the
+    # complete-cases rule below is what the paper's numbers are computed under,
+    # and it only applies between stages that were both attempted.
+    ran_stage2 = any(item.get('stage2_result') for item in results)
+    ran_stage3 = any(item.get('stage3_result') for item in results)
+
     for item in results:
         stage2 = item.get('stage2_result') or {}
         stage3 = item.get('stage3_result') or {}
@@ -114,19 +121,29 @@ def analyze_single_model(eval_file, model_name):
         s3_score = stage3.get('total_score', -1)
         dim_pairs, complete = _parse_dim_scores(stage3) if stage3 else ([], False)
 
-        if s2_score < 0 or s3_score < 0 or not complete:
+        s2_ok = s2_score >= 0
+        s3_ok = s3_score >= 0 and complete
+
+        # Complete cases only, when both rubrics were run.
+        if ran_stage2 and ran_stage3 and not (s2_ok and s3_ok):
             continue
 
-        stage2_scores.append(s2_score)
-        for check_item in stage2.get('checklist', []):
-            stage2_checklist_scores['all'].append(check_item.get('score', 0))
+        if s2_ok:
+            stage2_scores.append(s2_score)
+            for check_item in stage2.get('checklist', []):
+                stage2_checklist_scores['all'].append(check_item.get('score', 0))
 
-        stage3_scores.append(s3_score)
-        for dimension, pair in zip(DIMENSIONS, dim_pairs):
-            stage3_dim_scores[dimension.name].append(pair)
+        if s3_ok:
+            stage3_scores.append(s3_score)
+            for dimension, pair in zip(DIMENSIONS, dim_pairs):
+                stage3_dim_scores[dimension.name].append(pair)
 
-        # Each axis contributes 50 points so the average is out of 100.
-        combined_scores.append(s2_score * 50 + s3_score * 0.5)
+        # Each axis contributes 50 points so the average is out of 100. A
+        # single-stage run has no average -- half a score reported out of 100
+        # would rank it against two-stage runs as though it had scored zero on
+        # the rubric nobody ran.
+        if s2_ok and s3_ok:
+            combined_scores.append(s2_score * 50 + s3_score * 0.5)
 
     stats = {
         'model_name': model_name,
@@ -209,15 +226,22 @@ def print_detailed_stats(all_stats):
         print()
 
         print("Instruction Following (paper Stage 1):")
-        print(f"  Valid: {stats['stage2']['valid_count']}")
-        print(f"  Mean: {stats['stage2']['mean'] * 100:.2f}/100")
-        print(f"  Range: [{stats['stage2']['min'] * 100:.2f}, {stats['stage2']['max'] * 100:.2f}]")
+        if stats['stage2']['valid_count']:
+            print(f"  Valid: {stats['stage2']['valid_count']}")
+            print(f"  Mean: {stats['stage2']['mean'] * 100:.2f}/100")
+            print(f"  Range: [{stats['stage2']['min'] * 100:.2f}, "
+                  f"{stats['stage2']['max'] * 100:.2f}]")
+        else:
+            print("  not run")
         print()
 
         print("Podcast Script Quality (paper Stage 2):")
-        print(f"  Valid: {stats['stage3']['valid_count']}")
-        print(f"  Mean: {stats['stage3']['mean']:.2f}/100")
-        print(f"  Range: [{stats['stage3']['min']:.2f}, {stats['stage3']['max']:.2f}]")
+        if stats['stage3']['valid_count']:
+            print(f"  Valid: {stats['stage3']['valid_count']}")
+            print(f"  Mean: {stats['stage3']['mean']:.2f}/100")
+            print(f"  Range: [{stats['stage3']['min']:.2f}, {stats['stage3']['max']:.2f}]")
+        else:
+            print("  not run")
 
         if stats['stage3_dims']:
             print("  By dimension:")
@@ -228,6 +252,10 @@ def print_detailed_stats(all_stats):
         print()
 
         print("Average:")
+        if not stats['combined']['valid_count']:
+            print("  not available -- both stages are needed for an average")
+            print()
+            continue
         print(f"  Valid: {stats['combined']['valid_count']}")
         print(f"  Mean: {stats['combined']['mean']:.2f}/100")
         print(f"  Range: [{stats['combined']['min']:.2f}, {stats['combined']['max']:.2f}]")

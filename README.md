@@ -246,6 +246,34 @@ where the stated rate gives 1500. The English edition resolves that to the
 audit step's number, which is the one actually applied. Scores from the two
 editions are therefore not identical on a length-constrained sample.
 
+### Judges served by the local Claude CLI
+
+`--endpoint claude-cli` shells out to `claude -p` instead of making an HTTP
+request, which reaches a model no endpoint here carries and uses whatever
+credentials the CLI already has.
+
+```bash
+python evaluate_benchmark.py \
+  --model_file <generations.jsonl> \
+  --output_file ./results/<MODEL_NAME>_eval.jsonl \
+  --evaluator_model claude-sonnet-5 \
+  --endpoint claude-cli --language en
+```
+
+Three things it does that are not obvious, and each of them changes the score:
+
+- **The prompt goes in on stdin, not argv.** A rubric plus a long script is
+  larger than a command line should carry.
+- **`--system-prompt` replaces the CLI's own.** Otherwise the judge arrives
+  wearing a coding agent's system prompt and a list of tools it must not use.
+- **It runs in an empty temporary directory.** The CLI discovers `CLAUDE.md`
+  from its working directory, and a judge that has read the repository's
+  project rules is no longer judging the artifact alone.
+
+Calls run concurrently as separate processes, so `--max_workers` applies here
+too. The CLI exposes neither temperature nor seed, so this judge samples at the
+model's default and cannot reproduce the paper's greedy decoding.
+
 ### Judges served from somewhere other than OpenRouter
 
 `--endpoint openai` sends the judge to `api.openai.com` and reads
@@ -282,6 +310,8 @@ python evaluate_benchmark.py \
 | `--endpoint` | `openrouter` | Which chat-completions endpoint serves the judge |
 | `--base_url` | none | Override the endpoint URL entirely |
 | `--judge_temperature` | `0.0` | Negative omits the field, for models that reject it |
+| `--judge_timeout` | `900` | Seconds one judge call may take (`claude-cli` only) |
+| `--max_script_chars` | by `--language` | Cap on the judged script; truncation drops the tail |
 | `--no_resume` | off | Ignore an existing checkpoint |
 
 ## 📄 License

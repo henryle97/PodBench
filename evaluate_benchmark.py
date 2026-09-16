@@ -12,6 +12,8 @@ import json
 import os
 import argparse
 import datetime
+import subprocess
+import tempfile
 import time
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -34,8 +36,25 @@ file_lock = Lock()
 # Judge used for all results reported in the paper.
 DEFAULT_JUDGE_MODEL = "anthropic/claude-opus-4.5"
 
-# Judge inputs are capped to bound cost and stay within context limits.
+# Judge inputs are capped to bound cost and stay within context limits. The cap
+# is in characters, so it buys a different amount of podcast in each language: a
+# Chinese character is about one unit of speech, an English one about a fifth of
+# a word. 16000 Chinese characters is 53 minutes at the rubric's own 300 per
+# minute; 16000 English characters is about 2900 words, or 19 minutes at 150 per
+# minute. Sized per language, the two are the same stretch of speech, and the
+# English figure is then raised well past that so the cap stops binding on any
+# realistic episode: 100000 characters is about two hours of speech.
+#
+# The Chinese figure stays at upstream's 16000. Raising it would quietly change
+# the numbers this benchmark published.
+#
+# This matters more than a cost knob. Truncation keeps the head and drops the
+# tail, so a script cut here loses its ending, and the rubric scores an ending
+# that is not there: on a ten-episode English set, criterion 9 read 22% on the
+# truncated scripts and 88% on the intact ones, while no other criterion moved
+# more than 8 points.
 MAX_SCRIPT_CHARS = 16000
+MAX_SCRIPT_CHARS_BY_LANGUAGE = {"zh": 16000, "en": 100000}
 
 # Quality rubric dimensions. The judge names them in the language of the prompt
 # it was given, so the keys live in podbench_rubric rather than here.
@@ -58,6 +77,10 @@ JUDGE_ENDPOINTS = {
     "openrouter": ("https://openrouter.ai/api/v1/chat/completions", "OPENROUTER_API_KEY"),
     "openai": ("https://api.openai.com/v1/chat/completions", "OPENAI_API_KEY"),
 }
+
+#: Endpoints that are not HTTP at all. `claude-cli` shells out to the local
+#: `claude` binary in print mode and needs no key of its own.
+CLI_ENDPOINT = "claude-cli"
 
 
 class OpenRouterApi:
@@ -108,6 +131,107 @@ class OpenRouterApi:
 
         return requests.post(url=self.base_url, headers=headers, json=payload,
                              timeout=self.timeout)
+
+
+#: What the CLI judge is told it is. `claude -p` otherwise arrives wearing Claude
+#: Code's agent system prompt, which is written for a coding session and names
+#: tools the judge must not reach for. Replacing it outright is what makes the
+#: CLI behave like the plain model the other endpoints reach.
+CLI_JUDGE_SYSTEM_PROMPT = (
+    "You are an evaluation judge. Follow the instructions in the user message "
+    "exactly. Reply with only what they ask for, and nothing else -- no preamble, "
+    "no commentary, no code fences unless the instructions call for them."
+)
+
+
+class _CliResponse:
+    """A subprocess result, shaped like the chat-completions response.
+
+    `extract_content_from_response` reads `status_code`, `text` and `json()`, so
+    wearing that shape lets the CLI judge share every retry and parse path with
+    the HTTP ones rather than growing a second one.
+
+    Attributes:
+        status_code: 200 when the CLI returned a completion, 500 otherwise.
+        text: The error detail, read when `status_code` is not 200.
+    """
+
+    def __init__(self, status_code, text="", content=""):
+        self.status_code = status_code
+        self.text = text
+        self._content = content
+
+    def json(self):
+        """The completion, in chat-completions shape."""
+        return {"choices": [{"message": {"content": self._content}}]}
+
+
+class ClaudeCliApi:
+    """Judge served by the local `claude` CLI in print mode.
+
+    Reaches a model no HTTP endpoint here carries, using whatever credentials
+    the CLI already has. The prompt goes in on stdin rather than argv, because a
+    rubric plus a 100000-character script is larger than a command line should
+    carry.
+
+    `temperature` and `seed` are accepted and ignored: the CLI exposes neither,
+    so a judge run this way samples at the model's default and is noisier than a
+    greedy one. Anything comparing its scores has to say so.
+    """
+
+    def __init__(self, model, temperature=None, seed=None, timeout=900,
+                 system_prompt=CLI_JUDGE_SYSTEM_PROMPT):
+        self.model = model
+        self.timeout = timeout
+        self.temperature = None
+        self.seed = None
+        self.system_prompt = system_prompt
+        self.base_url = "claude -p (local CLI)"
+        # A directory with nothing in it. The CLI discovers CLAUDE.md from its
+        # working directory, and a judge that has read the repository's project
+        # rules is not judging the artifact alone.
+        self._cwd = tempfile.mkdtemp(prefix="podbench-judge-")
+
+    def call_chat(self, prompt, system_prompt=""):
+        """Run one judging prompt through the CLI.
+
+        Args:
+            prompt: The rendered rubric and artifact.
+            system_prompt: Overrides the judge system prompt for this call.
+
+        Returns:
+            A `_CliResponse`. Failures come back as status 500 rather than
+            raising, so the retry loop treats them like an HTTP error.
+        """
+        command = [
+            "claude", "-p",
+            "--model", self.model,
+            "--output-format", "json",
+            "--allowed-tools", "",
+            "--system-prompt", system_prompt or self.system_prompt,
+        ]
+        try:
+            completed = subprocess.run(
+                command, input=prompt, capture_output=True, text=True,
+                timeout=self.timeout, cwd=self._cwd, check=False,
+            )
+        except subprocess.TimeoutExpired:
+            return _CliResponse(500, f"claude -p timed out after {self.timeout}s")
+        except FileNotFoundError:
+            return _CliResponse(500, "claude CLI not found on PATH")
+
+        if completed.returncode != 0:
+            return _CliResponse(500, f"claude -p exit {completed.returncode}: "
+                                     f"{(completed.stderr or '')[:200]}")
+        try:
+            envelope = json.loads(completed.stdout)
+        except ValueError:
+            return _CliResponse(500, f"claude -p gave no JSON: {completed.stdout[:200]}")
+
+        if envelope.get("is_error"):
+            return _CliResponse(500, f"claude -p reported an error: "
+                                     f"{str(envelope.get('result'))[:200]}")
+        return _CliResponse(200, content=envelope.get("result") or "")
 
 
 def load_prompt_template(prompt_file):
@@ -320,7 +444,8 @@ def _annotate_truncation(eval_result, original_len, truncated_script):
         eval_result['original_length'] = original_len
 
 
-def evaluate_stage2(api, instruction, podcast_script, prompt_template, max_retries=10):
+def evaluate_stage2(api, instruction, podcast_script, prompt_template, max_retries=10,
+                    max_script_chars=MAX_SCRIPT_CHARS):
     """Score instruction following against the judge-generated checklist.
 
     Returns ``(result, success)``. The result carries the raw checklist plus
@@ -336,7 +461,7 @@ def evaluate_stage2(api, instruction, podcast_script, prompt_template, max_retri
             "error": "Empty podcast_script input",
         }, False
 
-    truncated_script = truncate_text(podcast_script)
+    truncated_script = truncate_text(podcast_script, max_script_chars)
     # Literal replacement avoids clashing with the JSON braces in the templates.
     prompt = (prompt_template
               .replace('{queries}', instruction or '')
@@ -366,7 +491,8 @@ def evaluate_stage2(api, instruction, podcast_script, prompt_template, max_retri
     return eval_result, True
 
 
-def evaluate_stage3(api, podcast_script, prompt_template, max_retries=10):
+def evaluate_stage3(api, podcast_script, prompt_template, max_retries=10,
+                    max_script_chars=MAX_SCRIPT_CHARS):
     """Score podcast script quality on the 100-point rubric.
 
     Returns ``(result, success)``. ``total_score`` is the sum of the three
@@ -375,7 +501,7 @@ def evaluate_stage3(api, podcast_script, prompt_template, max_retries=10):
     if not podcast_script:
         return {"total_score": -1, "error": "Empty podcast_script input"}, False
 
-    truncated_script = truncate_text(podcast_script)
+    truncated_script = truncate_text(podcast_script, max_script_chars)
     prompt = prompt_template.replace('{podcast_script}', truncated_script)
 
     # A judge that answered in a shape nobody asked for is retried, then failed.
@@ -414,10 +540,12 @@ def evaluate_single_task(task_info):
     if stage == 'stage2':
         eval_result, success = evaluate_stage2(
             task_info['api'], task_info['instruction'],
-            task_info['model_output'], task_info['prompt_template'])
+            task_info['model_output'], task_info['prompt_template'],
+            max_script_chars=task_info['max_script_chars'])
     else:
         eval_result, success = evaluate_stage3(
-            task_info['api'], task_info['model_output'], task_info['prompt_template'])
+            task_info['api'], task_info['model_output'], task_info['prompt_template'],
+            max_script_chars=task_info['max_script_chars'])
 
     return task_info['task_key'], eval_result, success, task_info
 
@@ -469,9 +597,19 @@ def save_single_eval_result(output_file, index, sample_id, instruction, stage, e
 
 
 def process_model_concurrent(api, model_results, output_file, stage2_template, stage3_template,
+                            max_script_chars=MAX_SCRIPT_CHARS,
                             max_workers=20, resume=True, stages=('stage2', 'stage3'),
                             target_model=None, judge_model=None, limit=None):
     """Evaluate every (sample, stage) pair, writing results as they complete."""
+    # Without resume the run starts from nothing, and that has to include the
+    # file. Results are appended, so leaving an old file in place silently mixes
+    # runs: a `--stages stage3` run over a file that already held stage2 rows
+    # reports an instruction-following score nobody asked it to measure.
+    if not resume and os.path.exists(output_file):
+        backup = f"{output_file}.replaced"
+        os.replace(output_file, backup)
+        print(f"--no_resume: moved the previous results to {backup}")
+
     processed_items = load_checkpoint(output_file) if resume else {}
 
     if processed_items:
@@ -491,6 +629,7 @@ def process_model_concurrent(api, model_results, output_file, stage2_template, s
     print(f"  Judge Model: {judge_model or 'Unknown'}")
     print(f"  Samples: {total_samples}")
     print(f"  Stages: {list(stages)}")
+    print(f"  Script cap in force: {max_script_chars} characters")
     print(f"  Total API calls: {total_samples * len(stages)}")
     print(f"  Max concurrent workers: {max_workers}")
     print(f"{'='*60}\n")
@@ -509,6 +648,7 @@ def process_model_concurrent(api, model_results, output_file, stage2_template, s
                 'instruction': item['instruction'],
                 'model_output': item['model_output'],
                 'prompt_template': stage2_template if stage == 'stage2' else stage3_template,
+                'max_script_chars': max_script_chars,
                 'task_key': (index, stage),
                 'index': index,
                 'sample_id': item['id'],
@@ -752,10 +892,17 @@ def main():
     parser.add_argument("--judge_seed", type=int, default=42,
                        help="Judge sampling seed; pass -1 to omit the field")
     parser.add_argument("--endpoint", type=str, default="openrouter",
-                       choices=sorted(JUDGE_ENDPOINTS),
-                       help="Which chat-completions endpoint serves the judge")
+                       choices=sorted([*JUDGE_ENDPOINTS, CLI_ENDPOINT]),
+                       help="Which endpoint serves the judge. claude-cli shells out "
+                            "to the local `claude -p` and uses its credentials")
+    parser.add_argument("--judge_timeout", type=int, default=900,
+                       help="Seconds one judge call may take (claude-cli only)")
     parser.add_argument("--base_url", type=str, default=None,
                        help="Override the endpoint URL entirely")
+    parser.add_argument("--max_script_chars", type=int, default=None,
+                       help="Cap on judged script length (default: by --language). "
+                            "Truncation drops the tail, so a cap below the script's "
+                            "length removes its ending before the rubric scores it")
     parser.add_argument("--language", type=str, default="zh",
                        choices=sorted(PROMPTS_BY_LANGUAGE),
                        help="Language of the scripts being judged; selects the judge "
@@ -778,6 +925,8 @@ def main():
     default_stage2, default_stage3 = PROMPTS_BY_LANGUAGE[args.language]
     args.stage2_prompt = args.stage2_prompt or default_stage2
     args.stage3_prompt = args.stage3_prompt or default_stage3
+    max_script_chars = (args.max_script_chars
+                        or MAX_SCRIPT_CHARS_BY_LANGUAGE.get(args.language, MAX_SCRIPT_CHARS))
 
     # Relative paths resolve against this file so the script runs from any directory.
     script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -789,15 +938,18 @@ def main():
     stage2_template = load_prompt_template(stage2_prompt_path)
     stage3_template = load_prompt_template(stage3_prompt_path)
 
-    endpoint_url, api_key_env = JUDGE_ENDPOINTS[args.endpoint]
-    api = OpenRouterApi(
-        model=args.evaluator_model,
-        api_key=args.api_key,
-        temperature=None if args.judge_temperature < 0 else args.judge_temperature,
-        seed=None if args.judge_seed < 0 else args.judge_seed,
-        base_url=args.base_url or endpoint_url,
-        api_key_env=api_key_env,
-    )
+    if args.endpoint == CLI_ENDPOINT:
+        api = ClaudeCliApi(model=args.evaluator_model, timeout=args.judge_timeout)
+    else:
+        endpoint_url, api_key_env = JUDGE_ENDPOINTS[args.endpoint]
+        api = OpenRouterApi(
+            model=args.evaluator_model,
+            api_key=args.api_key,
+            temperature=None if args.judge_temperature < 0 else args.judge_temperature,
+            seed=None if args.judge_seed < 0 else args.judge_seed,
+            base_url=args.base_url or endpoint_url,
+            api_key_env=api_key_env,
+        )
     print(f"Judge: {args.evaluator_model} at {api.base_url}")
     print(f"  temperature: {'omitted' if api.temperature is None else api.temperature}, "
           f"seed: {'omitted' if api.seed is None else api.seed}")
@@ -822,6 +974,7 @@ def main():
         args.output_file,
         stage2_template,
         stage3_template,
+        max_script_chars=max_script_chars,
         max_workers=args.max_workers,
         resume=not args.no_resume,
         stages=stages,
